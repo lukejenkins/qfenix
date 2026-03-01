@@ -17,8 +17,8 @@ QDL_SRCS += pdu.c ucs2_utf8.c at_port.c atcmd.c atconsole.c
 
 ifeq ($(UNAME_S),Darwin)
 QDL_SRCS += qcseriald.c
-CFLAGS += -DHAVE_QCSERIALD
-LDFLAGS += -framework IOKit -framework CoreFoundation -lutil
+override CFLAGS += -DHAVE_QCSERIALD
+override LDFLAGS += -framework IOKit -framework CoreFoundation -lutil
 endif
 
 QDL_OBJS := $(QDL_SRCS:.c=.o)
