@@ -30,6 +30,12 @@
 #include "oscompat.h"
 #include "vip.h"
 #include "version.h"
+#include "atcmd.h"
+#include "at_port.h"
+
+#ifdef HAVE_QCSERIALD
+#include "qcseriald.h"
+#endif
 
 #ifdef _WIN32
 const char *__progname = "qfenix";
@@ -796,6 +802,19 @@ static void print_usage(FILE *out)
 	fprintf(out, " (offline, no device needed):\n");
 	fprintf(out, "  xqcn2tar      Convert XQCN backup to TAR archive\n");
 	fprintf(out, "  tar2xqcn      Convert TAR archive to XQCN format\n");
+
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "\nAT Port Commands");
+	fprintf(out, " (AT command port, no programmer needed):\n");
+	fprintf(out, "  atcmd         Send AT commands, SMS, and USSD queries\n");
+	fprintf(out, "  atconsole     Interactive AT command console session\n");
+
+#ifdef HAVE_QCSERIALD
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "\nmacOS Serial Port Daemon");
+	fprintf(out, ":\n");
+	fprintf(out, "  qcseriald     Manage the USB-to-serial bridge daemon\n");
+#endif
 
 	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
 		       "\nOther Commands");
@@ -4822,6 +4841,26 @@ static void print_all_help(FILE *out)
 
 	fprintf(out, "\n");
 	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== atcmd ==========");
+	fprintf(out, "\n");
+	print_atcmd_help(out);
+
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== atconsole ==========");
+	fprintf(out, "\n");
+	print_atconsole_help(out);
+
+#ifdef HAVE_QCSERIALD
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== qcseriald ==========");
+	fprintf(out, "\n");
+	print_qcseriald_help(out);
+#endif
+
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
 		       "========== list ==========");
 	fprintf(out, "\n");
 	print_list_help(out);
@@ -4987,6 +5026,14 @@ int main(int argc, char **argv)
 		ret = qdl_xqcn2tar(argc - 1, argv + 1);
 	} else if (!strcmp(argv[1], "tar2xqcn")) {
 		ret = qdl_tar2xqcn(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "atcmd")) {
+		ret = qdl_atcmd(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "atconsole")) {
+		ret = qdl_atconsole(argc - 1, argv + 1);
+#ifdef HAVE_QCSERIALD
+	} else if (!strcmp(argv[1], "qcseriald")) {
+		ret = qdl_qcseriald(argc - 1, argv + 1);
+#endif
 	} else if (!strcmp(argv[1], "flash")) {
 		/*
 		 * "qfenix flash [options] [dir]" — treat bare positional

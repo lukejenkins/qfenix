@@ -9,7 +9,18 @@ LDFLAGS += -lws2_32 -lsetupapi
 endif
 prefix := /usr/local
 
+# Detect host OS for platform-specific sources
+UNAME_S := $(shell uname -s 2>/dev/null || echo Unknown)
+
 QDL_SRCS := firehose.c firehose_op.c io.c qdl.c sahara.c util.c patch.c program.c read.c sha2.c sim.c ufs.c usb.c ux.c oscompat.c vip.c sparse.c gpt.c diag_switch.c md5.c hdlc.c diag.c pcie.c
+QDL_SRCS += pdu.c ucs2_utf8.c at_port.c atcmd.c atconsole.c
+
+ifeq ($(UNAME_S),Darwin)
+QDL_SRCS += qcseriald.c
+CFLAGS += -DHAVE_QCSERIALD
+LDFLAGS += -framework IOKit -framework CoreFoundation -lutil
+endif
+
 QDL_OBJS := $(QDL_SRCS:.c=.o)
 
 MANIFEST_OBJ ?=

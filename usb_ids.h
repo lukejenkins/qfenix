@@ -179,4 +179,40 @@ static inline int get_diag_interface_num(uint16_t vid, uint16_t pid)
 	return 0;	/* default: interface 0 */
 }
 
+/*
+ * Human-readable vendor names for DIAG-capable vendors.
+ * Shared by qcseriald.c and at_port.c for display purposes.
+ */
+struct diag_vendor_name {
+	uint16_t    vid;
+	const char *name;
+};
+
+static const struct diag_vendor_name diag_vendor_names[] = {
+	{ 0x2c7c, "Quectel"                 },
+	{ 0x05c6, "Qualcomm"                },
+	{ 0x3c93, "Foxconn"                 },
+	{ 0x3763, "Sierra (alternate)"       },
+	{ 0x1199, "Sierra Wireless"          },
+	{ 0x19d2, "ZTE"                      },
+	{ 0x12d1, "Huawei"                   },
+	{ 0x413c, "Dell (Telit/Foxconn OEM)" },
+	{ 0x1bc7, "Telit"                    },
+	{ 0x1e0e, "Simcom"                   },
+	{ 0x0846, "Netgear"                  },
+	{ 0x2cb7, "Fibocom"                  },
+	{ 0x2dee, "MeiG Smart"              },
+};
+
+static inline const char *diag_vendor_name(uint16_t vid)
+{
+	size_t i;
+
+	for (i = 0; i < ARRAY_SIZE(diag_vendor_names); i++) {
+		if (diag_vendor_names[i].vid == vid)
+			return diag_vendor_names[i].name;
+	}
+	return NULL;
+}
+
 #endif /* __USB_IDS_H__ */

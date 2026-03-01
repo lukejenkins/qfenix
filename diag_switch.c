@@ -15,6 +15,10 @@
 #include "oscompat.h"
 #include "qdl.h"
 
+#ifdef HAVE_QCSERIALD
+#include "qcseriald.h"
+#endif
+
 /* Global flag to enable/disable automatic DIAG to EDL switching */
 bool qdl_auto_edl = true;
 
@@ -305,11 +309,18 @@ static int detect_diag_port_linux(char *port_buf, size_t buf_size,
 				  const char *serial)
 {
 #ifdef __APPLE__
+#ifdef HAVE_QCSERIALD
+	(void)serial;
+	if (qcseriald_ensure_running() != 0)
+		return 0;
+	return qcseriald_detect_diag_port(port_buf, buf_size);
+#else
 	(void)port_buf;
 	(void)buf_size;
 	(void)serial;
-	warnx("DIAG port detection is not supported on macOS");
+	warnx("DIAG port detection not supported on this macOS build");
 	return 0;
+#endif
 #else
 	const char *base = "/sys/bus/usb/devices";
 	DIR *busdir, *infdir;
