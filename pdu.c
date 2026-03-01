@@ -13,6 +13,10 @@
 
 #include "pdu.h"
 
+#ifdef _WIN32
+#define timegm _mkgmtime
+#endif
+
 #include <string.h>
 #include <time.h>
 
