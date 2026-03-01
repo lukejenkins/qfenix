@@ -281,7 +281,7 @@ static void *usb_to_pty(void *arg)
 	UInt8 buf[USB_BUF_SIZE];
 	IOReturn kr;
 	UInt32 len;
-	int not_responding_count = 0;
+	time_t last_good_read = time(NULL);
 
 	atomic_store(&b->usb_to_pty_alive, 1);
 	printf("[%s] USB->PTY thread started\n", b->func_name);
@@ -296,19 +296,28 @@ static void *usb_to_pty(void *arg)
 				       b->func_name, kr);
 				break;
 			}
-			if (kr == kIOReturnNotResponding ||
-			    kr == (IOReturn)0xe00002eb) {
-				/* Transient USB hiccup — clear and retry */
+			if (kr == kIOReturnNotResponding) {
+				/* Transient during AT port probing —
+				 * retry with timeout. Genuine disconnect
+				 * if it persists for 30+ seconds. */
 				(*b->iface)->ClearPipeStall(b->iface,
 							    b->pipe_in);
-				not_responding_count++;
-				if (not_responding_count > 50) {
-					printf("[%s] USB->PTY: device unresponsive after %d retries, giving up\n",
-					       b->func_name,
-					       not_responding_count);
+				if (time(NULL) - last_good_read > 30) {
+					printf("[%s] USB->PTY: not responding for 30s, giving up\n",
+					       b->func_name);
 					break;
 				}
-				usleep(100000);
+				usleep(10000);
+				continue;
+			}
+			if (kr == (IOReturn)0xe00002c0 ||
+			    kr == (IOReturn)0xe00002eb) {
+				/* Common after USB re-enumeration —
+				 * retry indefinitely (monitor loop
+				 * handles real disconnect detection). */
+				(*b->iface)->ClearPipeStall(b->iface,
+							    b->pipe_in);
+				usleep(10000);
 				continue;
 			}
 			fprintf(stderr, "[%s] USB->PTY ReadPipe error: 0x%x\n",
@@ -316,7 +325,7 @@ static void *usb_to_pty(void *arg)
 			usleep(10000);
 			continue;
 		}
-		not_responding_count = 0;
+		last_good_read = time(NULL);
 		if (len > 0) {
 			ssize_t written = 0;
 
@@ -1530,6 +1539,7 @@ static int cmd_start(int foreground)
 			UX_COLOR_RESET, getpid());
 		close(pipefd[1]);
 
+		g_daemon_state = "waiting";
 		printf(UX_COLOR_YELLOW
 		       "No modem found — entering rescan mode\n"
 		       UX_COLOR_RESET);
