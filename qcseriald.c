@@ -1561,6 +1561,7 @@ static int cmd_start(int foreground)
 static int cmd_stop(void)
 {
 	init_runtime_paths();
+	resolve_symlink_dir();
 
 	pid_t pid = pid_file_read();
 
