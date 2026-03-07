@@ -154,9 +154,8 @@ int at_detect_port(char *buf, size_t size, const char *serial)
 {
 #ifdef __APPLE__
 #ifdef HAVE_QCSERIALD
-	if (qcseriald_ensure_running() != 0)
-		return 0;
-	return qcseriald_detect_at_port(buf, size, 0);
+	(void)serial;
+	return qcseriald_wait_for_port("at0", buf, size);
 #else
 	(void)buf;
 	(void)size;

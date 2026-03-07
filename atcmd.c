@@ -158,40 +158,168 @@ int at_send_cmd(struct at_session *sess, const char *cmd,
 #else
 /* Windows compat for POSIX serial/sleep functions used in shared code */
 #define TCIOFLUSH 2
-#define tcflush(fd, queue) (void)(fd)
 #define usleep(us) Sleep((us) / 1000)
 
-/* Windows implementation stubs — uses CreateFile/DCB */
+/*
+ * tcflush() replacement for Windows — uses PurgeComm.
+ * The fd field stores a Windows HANDLE cast to int.
+ */
+#define tcflush(fd, queue) \
+	PurgeComm((HANDLE)(intptr_t)(fd), PURGE_RXCLEAR | PURGE_TXCLEAR)
+
+/* Windows write() shim — wraps WriteFile for AT command I/O */
+static inline ssize_t at_write(int fd, const void *buf, size_t len)
+{
+	DWORD written;
+
+	if (!WriteFile((HANDLE)(intptr_t)fd, buf, (DWORD)len, &written, NULL))
+		return -1;
+	return (ssize_t)written;
+}
+
+/* Override write() calls in shared AT code to use at_write() */
+#define write(fd, buf, len) at_write(fd, buf, len)
 
 struct at_session *at_open(const char *port, int timeout_ms)
 {
-	(void)port;
-	(void)timeout_ms;
-	ux_err("AT commands not yet supported on Windows\n");
-	return NULL;
+	struct at_session *s;
+	HANDLE hSerial;
+	DCB dcb = {0};
+	COMMTIMEOUTS timeouts = {0};
+	char portPath[280];
+
+	snprintf(portPath, sizeof(portPath), "\\\\.\\%s", port);
+
+	hSerial = CreateFileA(portPath, GENERIC_READ | GENERIC_WRITE,
+			      0, NULL, OPEN_EXISTING, 0, NULL);
+	if (hSerial == INVALID_HANDLE_VALUE) {
+		ux_err("Failed to open %s (error %lu)\n",
+		       port, GetLastError());
+		return NULL;
+	}
+
+	dcb.DCBlength = sizeof(dcb);
+	if (!GetCommState(hSerial, &dcb)) {
+		ux_err("Failed to get COM state for %s\n", port);
+		CloseHandle(hSerial);
+		return NULL;
+	}
+
+	dcb.BaudRate = CBR_115200;
+	dcb.ByteSize = 8;
+	dcb.StopBits = ONESTOPBIT;
+	dcb.Parity = NOPARITY;
+	dcb.fBinary = TRUE;
+	dcb.fParity = FALSE;
+	dcb.fOutxCtsFlow = FALSE;
+	dcb.fOutxDsrFlow = FALSE;
+	dcb.fDtrControl = DTR_CONTROL_ENABLE;
+	dcb.fRtsControl = RTS_CONTROL_ENABLE;
+	dcb.fOutX = FALSE;
+	dcb.fInX = FALSE;
+
+	if (!SetCommState(hSerial, &dcb)) {
+		ux_err("Failed to set COM state for %s\n", port);
+		CloseHandle(hSerial);
+		return NULL;
+	}
+
+	timeouts.ReadIntervalTimeout = 100;
+	timeouts.ReadTotalTimeoutConstant = timeout_ms;
+	timeouts.ReadTotalTimeoutMultiplier = 0;
+	timeouts.WriteTotalTimeoutConstant = 3000;
+	timeouts.WriteTotalTimeoutMultiplier = 0;
+
+	if (!SetCommTimeouts(hSerial, &timeouts)) {
+		ux_err("Failed to set timeouts for %s\n", port);
+		CloseHandle(hSerial);
+		return NULL;
+	}
+
+	PurgeComm(hSerial, PURGE_RXCLEAR | PURGE_TXCLEAR);
+
+	s = calloc(1, sizeof(*s));
+	if (!s) {
+		CloseHandle(hSerial);
+		return NULL;
+	}
+	s->fd = (int)(intptr_t)hSerial;
+	snprintf(s->port, sizeof(s->port), "%s", port);
+	s->timeout_ms = timeout_ms;
+	return s;
 }
 
 void at_close(struct at_session *sess)
 {
+	if (!sess)
+		return;
+	if (sess->fd)
+		CloseHandle((HANDLE)(intptr_t)sess->fd);
 	free(sess);
 }
 
 int at_read_line(struct at_session *sess, char *buf, size_t size)
 {
-	(void)sess;
-	(void)buf;
-	(void)size;
-	return -1;
+	HANDLE h = (HANDLE)(intptr_t)sess->fd;
+	size_t pos = 0;
+	DWORD n;
+	char c;
+
+	while (pos < size - 1) {
+		if (!ReadFile(h, &c, 1, &n, NULL) || n == 0)
+			break; /* timeout or error */
+		buf[pos++] = c;
+		if (c == '\n')
+			break;
+	}
+	buf[pos] = '\0';
+	return (int)pos;
 }
 
 int at_send_cmd(struct at_session *sess, const char *cmd,
 		char *resp, size_t resp_size)
 {
-	(void)sess;
-	(void)cmd;
-	(void)resp;
-	(void)resp_size;
-	return -1;
+	HANDLE h = (HANDLE)(intptr_t)sess->fd;
+	char line[1024];
+	size_t resp_pos = 0;
+	int len;
+	DWORD written;
+
+	PurgeComm(h, PURGE_RXCLEAR | PURGE_TXCLEAR);
+
+	/* Send command + CR */
+	WriteFile(h, cmd, (DWORD)strlen(cmd), &written, NULL);
+	WriteFile(h, "\r", 1, &written, NULL);
+
+	if (resp)
+		resp[0] = '\0';
+
+	while ((len = at_read_line(sess, line, sizeof(line))) > 0) {
+		if (sess->debug)
+			ux_log("AT< %s", line);
+
+		/* Skip empty lines and echo */
+		if (line[0] == '\r' || line[0] == '\n')
+			continue;
+
+		/* Append to response buffer */
+		if (resp && resp_pos + len < resp_size) {
+			memcpy(resp + resp_pos, line, len);
+			resp_pos += len;
+			resp[resp_pos] = '\0';
+		}
+
+		/* Check for terminal responses */
+		if (strncmp(line, "OK", 2) == 0)
+			return 0;
+		if (strncmp(line, "ERROR", 5) == 0 ||
+		    strncmp(line, "+CMS ERROR", 10) == 0 ||
+		    strncmp(line, "+CME ERROR", 10) == 0 ||
+		    strncmp(line, "COMMAND NOT SUPPORT", 19) == 0)
+			return -1;
+	}
+
+	return -1; /* timeout or read error */
 }
 
 #endif /* _WIN32 */
@@ -730,63 +858,319 @@ static int atcmd_raw(struct at_session *sess, const char *command)
 	return -1;
 }
 
+/* ── Shared session helper ── */
+
+static struct at_session *at_session_open(const char *serial,
+					  const char *port,
+					  int timeout, int debug)
+{
+	char port_buf[256];
+	struct at_session *sess;
+
+	if (!port) {
+		if (!at_detect_port(port_buf, sizeof(port_buf), serial)) {
+			ux_err("No AT port found. Use -p to specify manually.\n");
+			return NULL;
+		}
+		port = port_buf;
+		ux_info("Using AT port: %s\n", port);
+	}
+
+	sess = at_open(port, timeout * 1000);
+	if (!sess)
+		return NULL;
+	sess->debug = debug;
+	return sess;
+}
+
 /* ── Help text ── */
 
-void print_atcmd_help(FILE *out)
+void print_smssend_help(FILE *out)
 {
-	fprintf(out, "Usage: qfenix atcmd [options] <subcommand> [args]\n\n");
-	fprintf(out, "Subcommands:\n");
-	fprintf(out, "  send <phone> <message>     Send an SMS message\n");
-	fprintf(out, "  recv [-j] [-r] [-s S] [-f F]  Receive/list SMS messages\n");
-	fprintf(out, "  delete <index|all>         Delete SMS message(s)\n");
-	fprintf(out, "  status [-s storage]        Query SMS storage status\n");
-	fprintf(out, "  ussd [-c coding] [-R] <code>  Send USSD query\n");
-	fprintf(out, "  <AT command>               Send raw AT command\n\n");
+	fprintf(out, "Usage: qfenix smssend [options] <phone> <message>\n\n");
+	fprintf(out, "Send an SMS message via PDU mode.\n\n");
 	fprintf(out, "Options:\n");
 	fprintf(out, "  -S serial      Target by serial number (auto-detect port)\n");
 	fprintf(out, "  -p port        Manual port path (/dev/ttyUSB2, COM9, etc.)\n");
 	fprintf(out, "  -d             Debug mode\n");
-	fprintf(out, "  -t seconds     Timeout (default 10s, 180s for USSD)\n");
-	fprintf(out, "  -j             JSON output (for recv)\n");
-	fprintf(out, "  -r             Raw output (for recv/ussd)\n");
-	fprintf(out, "  -R             Raw input (for ussd — skip PDU encoding)\n");
-	fprintf(out, "  -s storage     SMS storage type (for recv/status)\n");
-	fprintf(out, "  -f format      Date format (for recv, default: %%D %%T)\n");
-	fprintf(out, "  -c coding      USSD coding: 0=7bit, 2=UCS2 (default: auto)\n");
+	fprintf(out, "  -t seconds     Timeout (default 10s)\n");
 }
 
-/* ── Main dispatcher ── */
+void print_smsread_help(FILE *out)
+{
+	fprintf(out, "Usage: qfenix smsread [options]\n\n");
+	fprintf(out, "Receive/list SMS messages from modem storage.\n\n");
+	fprintf(out, "Options:\n");
+	fprintf(out, "  -S serial      Target by serial number (auto-detect port)\n");
+	fprintf(out, "  -p port        Manual port path (/dev/ttyUSB2, COM9, etc.)\n");
+	fprintf(out, "  -d             Debug mode\n");
+	fprintf(out, "  -t seconds     Timeout (default 10s)\n");
+	fprintf(out, "  -j             JSON output\n");
+	fprintf(out, "  -r             Raw PDU output (no decoding)\n");
+	fprintf(out, "  -s storage     SMS storage type (e.g. SM, ME)\n");
+	fprintf(out, "  -f format      Date format (default: %%D %%T)\n");
+}
 
-int qdl_atcmd(int argc, char **argv)
+void print_smsrm_help(FILE *out)
+{
+	fprintf(out, "Usage: qfenix smsrm [options] <index|all>\n\n");
+	fprintf(out, "Delete SMS message(s) by index or all.\n\n");
+	fprintf(out, "Options:\n");
+	fprintf(out, "  -S serial      Target by serial number (auto-detect port)\n");
+	fprintf(out, "  -p port        Manual port path (/dev/ttyUSB2, COM9, etc.)\n");
+	fprintf(out, "  -d             Debug mode\n");
+	fprintf(out, "  -t seconds     Timeout (default 10s)\n");
+}
+
+void print_smsstatus_help(FILE *out)
+{
+	fprintf(out, "Usage: qfenix smsstatus [options]\n\n");
+	fprintf(out, "Query SMS storage status (used/total slots).\n\n");
+	fprintf(out, "Options:\n");
+	fprintf(out, "  -S serial      Target by serial number (auto-detect port)\n");
+	fprintf(out, "  -p port        Manual port path (/dev/ttyUSB2, COM9, etc.)\n");
+	fprintf(out, "  -d             Debug mode\n");
+	fprintf(out, "  -t seconds     Timeout (default 10s)\n");
+	fprintf(out, "  -s storage     SMS storage type (e.g. SM, ME)\n");
+}
+
+void print_ussd_help(FILE *out)
+{
+	fprintf(out, "Usage: qfenix ussd [options] <code>\n\n");
+	fprintf(out, "Send a USSD/USSI query (e.g. *#06#, *100#).\n\n");
+	fprintf(out, "Options:\n");
+	fprintf(out, "  -S serial      Target by serial number (auto-detect port)\n");
+	fprintf(out, "  -p port        Manual port path (/dev/ttyUSB2, COM9, etc.)\n");
+	fprintf(out, "  -d             Debug mode\n");
+	fprintf(out, "  -t seconds     Timeout (default 10s)\n");
+	fprintf(out, "  -c coding      USSD coding: 0=7bit, 2=UCS2 (default: auto)\n");
+	fprintf(out, "  -r             Raw output (no PDU decoding)\n");
+	fprintf(out, "  -R             Raw input (skip PDU encoding)\n");
+}
+
+void print_atcmd_help(FILE *out)
+{
+	fprintf(out, "Usage: qfenix atcmd [options] <AT command>\n\n");
+	fprintf(out, "Send a raw AT command to the modem.\n\n");
+	fprintf(out, "Options:\n");
+	fprintf(out, "  -S serial      Target by serial number (auto-detect port)\n");
+	fprintf(out, "  -p port        Manual port path (/dev/ttyUSB2, COM9, etc.)\n");
+	fprintf(out, "  -d             Debug mode\n");
+	fprintf(out, "  -t seconds     Timeout (default 10s)\n");
+}
+
+/* ── Top-level subcommand dispatchers ── */
+
+int qdl_smssend(int argc, char **argv)
+{
+	const char *serial = NULL;
+	const char *port = NULL;
+	int debug = 0, timeout = 10, ch, ret;
+	struct at_session *sess;
+
+	optind = 1;
+	while ((ch = getopt(argc, argv, "S:p:dt:h")) != -1) {
+		switch (ch) {
+		case 'S': serial = optarg; break;
+		case 'p': port = optarg; break;
+		case 'd': debug = 1; break;
+		case 't': timeout = atoi(optarg); break;
+		case 'h':
+			print_smssend_help(stdout);
+			return 0;
+		default:
+			print_smssend_help(stderr);
+			return 1;
+		}
+	}
+
+	argv += optind;
+	argc -= optind;
+
+	if (argc < 2) {
+		ux_err("Usage: qfenix smssend <phone> <message>\n");
+		return 1;
+	}
+
+	sess = at_session_open(serial, port, timeout, debug);
+	if (!sess)
+		return 1;
+
+	ret = atcmd_sms_send(sess, argv[0], argv[1]) ? 1 : 0;
+	at_close(sess);
+	return ret;
+}
+
+int qdl_smsread(int argc, char **argv)
 {
 	const char *serial = NULL;
 	const char *port = NULL;
 	const char *storage = "";
 	const char *datefmt = "%D %T";
-	int debug = 0;
-	int timeout = 10;
-	int json = 0;
-	int raw_out = 0;
-	int raw_in = 0;
-	int dcs = -1;
-	int ch;
+	int debug = 0, timeout = 10, json = 0, raw = 0, ch, ret;
 	struct at_session *sess;
-	char port_buf[256];
-	int ret = 0;
 
 	optind = 1;
-	while ((ch = getopt(argc, argv, "S:p:dt:jrRs:f:c:h")) != -1) {
+	while ((ch = getopt(argc, argv, "S:p:dt:jrs:f:h")) != -1) {
 		switch (ch) {
 		case 'S': serial = optarg; break;
 		case 'p': port = optarg; break;
 		case 'd': debug = 1; break;
 		case 't': timeout = atoi(optarg); break;
 		case 'j': json = 1; break;
-		case 'r': raw_out = 1; break;
-		case 'R': raw_in = 1; break;
+		case 'r': raw = 1; break;
 		case 's': storage = optarg; break;
 		case 'f': datefmt = optarg; break;
+		case 'h':
+			print_smsread_help(stdout);
+			return 0;
+		default:
+			print_smsread_help(stderr);
+			return 1;
+		}
+	}
+
+	sess = at_session_open(serial, port, timeout, debug);
+	if (!sess)
+		return 1;
+
+	ret = atcmd_sms_recv(sess, json, raw, storage, datefmt) ? 1 : 0;
+	at_close(sess);
+	return ret;
+}
+
+int qdl_smsrm(int argc, char **argv)
+{
+	const char *serial = NULL;
+	const char *port = NULL;
+	int debug = 0, timeout = 10, ch, ret;
+	struct at_session *sess;
+
+	optind = 1;
+	while ((ch = getopt(argc, argv, "S:p:dt:h")) != -1) {
+		switch (ch) {
+		case 'S': serial = optarg; break;
+		case 'p': port = optarg; break;
+		case 'd': debug = 1; break;
+		case 't': timeout = atoi(optarg); break;
+		case 'h':
+			print_smsrm_help(stdout);
+			return 0;
+		default:
+			print_smsrm_help(stderr);
+			return 1;
+		}
+	}
+
+	argv += optind;
+	argc -= optind;
+
+	if (argc < 1) {
+		ux_err("Usage: qfenix smsrm <index|all>\n");
+		return 1;
+	}
+
+	sess = at_session_open(serial, port, timeout, debug);
+	if (!sess)
+		return 1;
+
+	ret = atcmd_sms_delete(sess, argv[0]) ? 1 : 0;
+	at_close(sess);
+	return ret;
+}
+
+int qdl_smsstatus(int argc, char **argv)
+{
+	const char *serial = NULL;
+	const char *port = NULL;
+	const char *storage = "";
+	int debug = 0, timeout = 10, ch, ret;
+	struct at_session *sess;
+
+	optind = 1;
+	while ((ch = getopt(argc, argv, "S:p:dt:s:h")) != -1) {
+		switch (ch) {
+		case 'S': serial = optarg; break;
+		case 'p': port = optarg; break;
+		case 'd': debug = 1; break;
+		case 't': timeout = atoi(optarg); break;
+		case 's': storage = optarg; break;
+		case 'h':
+			print_smsstatus_help(stdout);
+			return 0;
+		default:
+			print_smsstatus_help(stderr);
+			return 1;
+		}
+	}
+
+	sess = at_session_open(serial, port, timeout, debug);
+	if (!sess)
+		return 1;
+
+	ret = atcmd_sms_status(sess, storage) ? 1 : 0;
+	at_close(sess);
+	return ret;
+}
+
+int qdl_ussd(int argc, char **argv)
+{
+	const char *serial = NULL;
+	const char *port = NULL;
+	int debug = 0, timeout = 10, ch, ret;
+	int raw_out = 0, raw_in = 0, dcs = -1;
+	struct at_session *sess;
+
+	optind = 1;
+	while ((ch = getopt(argc, argv, "S:p:dt:c:rRh")) != -1) {
+		switch (ch) {
+		case 'S': serial = optarg; break;
+		case 'p': port = optarg; break;
+		case 'd': debug = 1; break;
+		case 't': timeout = atoi(optarg); break;
 		case 'c': dcs = atoi(optarg); break;
+		case 'r': raw_out = 1; break;
+		case 'R': raw_in = 1; break;
+		case 'h':
+			print_ussd_help(stdout);
+			return 0;
+		default:
+			print_ussd_help(stderr);
+			return 1;
+		}
+	}
+
+	argv += optind;
+	argc -= optind;
+
+	if (argc < 1) {
+		ux_err("Usage: qfenix ussd <code>\n");
+		return 1;
+	}
+
+	sess = at_session_open(serial, port, timeout, debug);
+	if (!sess)
+		return 1;
+
+	ret = atcmd_ussd(sess, argv[0], raw_in, raw_out, dcs) ? 1 : 0;
+	at_close(sess);
+	return ret;
+}
+
+int qdl_atcmd(int argc, char **argv)
+{
+	const char *serial = NULL;
+	const char *port = NULL;
+	int debug = 0, timeout = 10, ch, ret;
+	struct at_session *sess;
+
+	optind = 1;
+	while ((ch = getopt(argc, argv, "S:p:dt:h")) != -1) {
+		switch (ch) {
+		case 'S': serial = optarg; break;
+		case 'p': port = optarg; break;
+		case 'd': debug = 1; break;
+		case 't': timeout = atoi(optarg); break;
 		case 'h':
 			print_atcmd_help(stdout);
 			return 0;
@@ -804,60 +1188,22 @@ int qdl_atcmd(int argc, char **argv)
 		return 1;
 	}
 
-	/* Determine port */
-	if (!port) {
-		if (!at_detect_port(port_buf, sizeof(port_buf), serial)) {
-			ux_err("No AT port found. Use -p to specify manually.\n");
-			return 1;
-		}
-		port = port_buf;
-		ux_info("Using AT port: %s\n", port);
-	}
-
-	sess = at_open(port, timeout * 1000);
+	sess = at_session_open(serial, port, timeout, debug);
 	if (!sess)
 		return 1;
-	sess->debug = debug;
 
-	if (!strcmp(argv[0], "send")) {
-		if (argc < 3) {
-			ux_err("Usage: atcmd send <phone> <message>\n");
-			ret = 1;
-		} else {
-			ret = atcmd_sms_send(sess, argv[1], argv[2]) ? 1 : 0;
-		}
-	} else if (!strcmp(argv[0], "recv")) {
-		ret = atcmd_sms_recv(sess, json, raw_out, storage, datefmt) ? 1 : 0;
-	} else if (!strcmp(argv[0], "delete")) {
-		if (argc < 2) {
-			ux_err("Usage: atcmd delete <index|all>\n");
-			ret = 1;
-		} else {
-			ret = atcmd_sms_delete(sess, argv[1]) ? 1 : 0;
-		}
-	} else if (!strcmp(argv[0], "status")) {
-		ret = atcmd_sms_status(sess, storage) ? 1 : 0;
-	} else if (!strcmp(argv[0], "ussd")) {
-		if (argc < 2) {
-			ux_err("Usage: atcmd ussd <code>\n");
-			ret = 1;
-		} else {
-			ret = atcmd_ussd(sess, argv[1], raw_in, raw_out, dcs) ? 1 : 0;
-		}
-	} else {
-		/* Raw AT command — join all remaining args */
-		char raw_cmd[1024] = {0};
-		int off = 0;
+	/* Join all remaining args into one AT command string */
+	char raw_cmd[1024] = {0};
+	int off = 0;
 
-		for (int i = 0; i < argc && off < (int)sizeof(raw_cmd) - 2; i++) {
-			if (i > 0)
-				raw_cmd[off++] = ' ';
-			off += snprintf(raw_cmd + off, sizeof(raw_cmd) - off,
-					"%s", argv[i]);
-		}
-		ret = atcmd_raw(sess, raw_cmd) ? 1 : 0;
+	for (int i = 0; i < argc && off < (int)sizeof(raw_cmd) - 2; i++) {
+		if (i > 0)
+			raw_cmd[off++] = ' ';
+		off += snprintf(raw_cmd + off, sizeof(raw_cmd) - off,
+				"%s", argv[i]);
 	}
 
+	ret = atcmd_raw(sess, raw_cmd) ? 1 : 0;
 	at_close(sess);
 	return ret;
 }

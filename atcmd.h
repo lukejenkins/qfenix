@@ -24,16 +24,22 @@ int at_read_line(struct at_session *sess, char *buf, size_t size);
 int at_send_cmd(struct at_session *sess, const char *cmd,
 		char *resp, size_t resp_size);
 
-/* Main dispatcher for "qfenix atcmd <subcommand>" */
+/* Top-level subcommand dispatchers */
+int qdl_smssend(int argc, char **argv);
+int qdl_smsread(int argc, char **argv);
+int qdl_smsrm(int argc, char **argv);
+int qdl_smsstatus(int argc, char **argv);
+int qdl_ussd(int argc, char **argv);
 int qdl_atcmd(int argc, char **argv);
-
-/* Print help for atcmd */
-void print_atcmd_help(FILE *out);
-
-/* Main dispatcher for "qfenix atconsole" */
 int qdl_atconsole(int argc, char **argv);
 
-/* Print help for atconsole */
+/* Per-command help */
+void print_smssend_help(FILE *out);
+void print_smsread_help(FILE *out);
+void print_smsrm_help(FILE *out);
+void print_smsstatus_help(FILE *out);
+void print_ussd_help(FILE *out);
+void print_atcmd_help(FILE *out);
 void print_atconsole_help(FILE *out);
 
 #endif /* __ATCMD_H__ */

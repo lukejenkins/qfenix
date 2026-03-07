@@ -43,6 +43,14 @@ int qcseriald_is_running(void);
  */
 int qcseriald_ensure_running(void);
 
+/*
+ * Wait for a specific port to become available via qcseriald.
+ * Starts daemon if needed, polls status file with user-friendly output.
+ * port_type: "diag", "at0", "at1", etc.
+ * Returns 1 if found (path written to buf), 0 on failure.
+ */
+int qcseriald_wait_for_port(const char *port_type, char *buf, size_t size);
+
 /* Print help text for qcseriald subcommand */
 void print_qcseriald_help(FILE *out);
 

@@ -849,8 +849,9 @@ static int setup_bridges(void)
 	return 0;
 }
 
-/* Forward declaration */
+/* Forward declarations */
 static void write_status_file(void);
+static int read_status_port(char *buf, size_t size, const char *prefix);
 
 /* ── Port rename helper ── */
 
@@ -1961,7 +1962,7 @@ int qcseriald_ensure_running(void)
 		_exit(1);
 	}
 
-	/* Parent: wait for daemon to start and ports to be probed */
+	/* Parent: wait for daemon to start (max 5s) */
 	int status;
 
 	waitpid(child, &status, 0);
@@ -1970,42 +1971,193 @@ int qcseriald_ensure_running(void)
 		return -1;
 	}
 
-	/*
-	 * Wait for port probing to complete. The daemon reports
-	 * initial ports immediately, but probing (AT/RDY detection)
-	 * can take up to 30s on cold boot. Poll the status file
-	 * for completion.
-	 */
-	for (int i = 0; i < 70; i++) {
-		FILE *f;
-		char line[512];
-		int has_loading = 0;
-		int has_ports = 0;
-
+	/* Brief wait for PID file to appear */
+	for (int i = 0; i < 10; i++) {
 		usleep(500000);
-
-		f = fopen(g_status_file, "r");
-		if (!f)
-			continue;
-
-		while (fgets(line, sizeof(line), f)) {
-			if (strstr(line, "port."))
-				has_ports = 1;
-			if (strstr(line, "-loading"))
-				has_loading = 1;
-		}
-		fclose(f);
-
-		if (has_ports && !has_loading)
+		if (qcseriald_is_running())
 			return 0;
 	}
 
-	/* Timed out but daemon is running — ports may still work */
-	if (qcseriald_is_running())
+	ux_err("qcseriald failed to start (no PID file after 5s)\n");
+	return -1;
+}
+
+/*
+ * Daemon status snapshot — parsed from the status file.
+ */
+struct daemon_status {
+	char state[32];		/* "starting", "running", "waiting" */
+	char edl[128];		/* EDL device product string (if any) */
+	int  bridges;		/* number of bridges */
+	int  has_loading;	/* any port in -loading state */
+	int  has_ports;		/* any port.* line exists */
+	int  port_count;	/* total port lines */
+	char ports[8][64];	/* port func_names (e.g., "diag", "at0") */
+};
+
+/*
+ * Read full daemon status from status file.
+ * Returns 1 if status file was readable, 0 otherwise.
+ */
+static int read_daemon_status(struct daemon_status *st)
+{
+	FILE *f;
+	char line[512];
+
+	memset(st, 0, sizeof(*st));
+
+	f = fopen(g_status_file, "r");
+	if (!f)
 		return 0;
 
-	ux_err("qcseriald timed out waiting for port probing\n");
-	return -1;
+	while (fgets(line, sizeof(line), f)) {
+		line[strcspn(line, "\r\n")] = '\0';
+
+		if (strncmp(line, "state=", 6) == 0) {
+			snprintf(st->state, sizeof(st->state),
+				 "%s", line + 6);
+		} else if (strncmp(line, "bridges=", 8) == 0) {
+			st->bridges = atoi(line + 8);
+		} else if (strncmp(line, "edl=", 4) == 0) {
+			snprintf(st->edl, sizeof(st->edl),
+				 "%s", line + 4);
+		} else if (strncmp(line, "port.", 5) == 0) {
+			char *eq = strchr(line + 5, '=');
+
+			st->has_ports = 1;
+			if (strstr(line, "-loading"))
+				st->has_loading = 1;
+			if (eq && st->port_count < 8) {
+				int len = (int)(eq - (line + 5));
+
+				if (len > 0 && len < 64)
+					snprintf(st->ports[st->port_count++],
+						 64, "%.*s", len, line + 5);
+			}
+		}
+	}
+	fclose(f);
+	return 1;
+}
+
+/*
+ * Format a port list string like "diag, at0, at1, nmea".
+ */
+static void format_port_list(const struct daemon_status *st,
+			     char *buf, size_t size)
+{
+	int off = 0;
+
+	for (int i = 0; i < st->port_count && off < (int)size - 2; i++) {
+		if (i > 0)
+			off += snprintf(buf + off, size - off, ", ");
+		off += snprintf(buf + off, size - off, "%s", st->ports[i]);
+	}
+}
+
+/*
+ * Wait for a specific port to become available via qcseriald.
+ * Starts the daemon if not running, then polls the status file
+ * with user-friendly output until the port appears or Ctrl+C.
+ *
+ * port_type: "diag", "at0", "at1", etc.
+ * Returns 1 if found (path written to buf), 0 on failure.
+ */
+int qcseriald_wait_for_port(const char *port_type, char *buf, size_t size)
+{
+	init_runtime_paths();
+
+	/* Step 1: ensure daemon is running */
+	if (qcseriald_ensure_running() != 0)
+		return 0;
+
+	/* Step 2: check immediately — fast path */
+	if (read_status_port(buf, size, port_type))
+		return 1;
+
+	/* Step 3: poll with status output */
+	time_t start = time(NULL);
+	char last_phase[32] = {0};
+	int printed = 0;
+
+	for (;;) {
+		struct daemon_status st;
+		int elapsed = (int)(time(NULL) - start);
+		const char *phase;
+		char detail[320];
+
+		/* Check if daemon died */
+		if (!qcseriald_is_running()) {
+			if (printed)
+				fprintf(stderr, "\n");
+			ux_err("qcseriald daemon stopped unexpectedly\n");
+			return 0;
+		}
+
+		/* Read current daemon state and determine phase + message */
+		if (!read_daemon_status(&st)) {
+			phase = "starting";
+			snprintf(detail, sizeof(detail),
+				 "Starting qcseriald daemon...");
+		} else if (st.edl[0] && !st.has_ports) {
+			phase = "edl";
+			snprintf(detail, sizeof(detail),
+				 "EDL device: %s (not serial) "
+				 "— waiting for modem...",
+				 st.edl);
+		} else if (st.bridges > 0 && st.has_loading) {
+			char ports[256];
+
+			phase = "loading";
+			format_port_list(&st, ports, sizeof(ports));
+			snprintf(detail, sizeof(detail),
+				 "Modem detected (%d bridge%s: %s) "
+				 "— identifying ports...",
+				 st.bridges,
+				 st.bridges == 1 ? "" : "s",
+				 ports);
+		} else if (st.has_ports &&
+			   strcmp(st.state, "running") == 0) {
+			char ports[256];
+
+			phase = "running";
+			format_port_list(&st, ports, sizeof(ports));
+			snprintf(detail, sizeof(detail),
+				 "Ports ready (%s) "
+				 "— waiting for %s port...",
+				 ports, port_type);
+		} else {
+			phase = "waiting";
+			snprintf(detail, sizeof(detail),
+				 "Modem not connected or ports not "
+				 "ready. Waiting...");
+		}
+
+		/*
+		 * On phase change: finalize the previous line with \n,
+		 * then print the new phase message on a fresh line.
+		 * On same phase: overwrite the timer in place with \r.
+		 */
+		if (strcmp(phase, last_phase) != 0) {
+			if (printed)
+				fprintf(stderr, "\n");
+			snprintf(last_phase, sizeof(last_phase), "%s", phase);
+		}
+		fprintf(stderr, "\r%s (Ctrl+C to abort) [%ds]   ",
+			detail, elapsed);
+		fflush(stderr);
+		printed = 1;
+
+		/* Check for port AFTER displaying state — catches
+		 * transitions that happen simultaneously with port
+		 * becoming available (e.g., DIAG is never "loading"). */
+		if (read_status_port(buf, size, port_type)) {
+			fprintf(stderr, "\n");
+			return 1;
+		}
+
+		sleep(1);
+	}
 }
 
 static int read_status_port(char *buf, size_t size, const char *prefix)

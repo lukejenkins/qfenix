@@ -804,10 +804,15 @@ static void print_usage(FILE *out)
 	fprintf(out, "  tar2xqcn      Convert TAR archive to XQCN format\n");
 
 	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
-		       "\nAT Port Commands");
+		       "\nAT/SMS Operations");
 	fprintf(out, " (AT command port, no programmer needed):\n");
-	fprintf(out, "  atcmd         Send AT commands, SMS, and USSD queries\n");
-	fprintf(out, "  atconsole     Interactive AT command console session\n");
+	fprintf(out, "  smssend       Send an SMS message\n");
+	fprintf(out, "  smsread       Receive/list SMS messages\n");
+	fprintf(out, "  smsrm         Delete SMS message(s)\n");
+	fprintf(out, "  smsstatus     Query SMS storage status\n");
+	fprintf(out, "  ussd          Send USSD/USSI query\n");
+	fprintf(out, "  atcmd         Send a raw AT command\n");
+	fprintf(out, "  atconsole     Interactive AT command console\n");
 
 #ifdef HAVE_QCSERIALD
 	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
@@ -4841,6 +4846,36 @@ static void print_all_help(FILE *out)
 
 	fprintf(out, "\n");
 	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== smssend ==========");
+	fprintf(out, "\n");
+	print_smssend_help(out);
+
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== smsread ==========");
+	fprintf(out, "\n");
+	print_smsread_help(out);
+
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== smsrm ==========");
+	fprintf(out, "\n");
+	print_smsrm_help(out);
+
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== smsstatus ==========");
+	fprintf(out, "\n");
+	print_smsstatus_help(out);
+
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
+		       "========== ussd ==========");
+	fprintf(out, "\n");
+	print_ussd_help(out);
+
+	fprintf(out, "\n");
+	ux_fputs_color(out, UX_COLOR_BOLD UX_COLOR_GREEN,
 		       "========== atcmd ==========");
 	fprintf(out, "\n");
 	print_atcmd_help(out);
@@ -4922,6 +4957,26 @@ int main(int argc, char **argv)
 	int ret;
 
 	ux_init();
+
+#ifdef __APPLE__
+	/* macOS requires root for USB device access (libusb/IOKit) */
+	if (getuid() != 0) {
+		char **new_argv = malloc((argc + 2) * sizeof(char *));
+
+		if (!new_argv) {
+			fprintf(stderr, "Error: out of memory\n");
+			return 1;
+		}
+		new_argv[0] = "sudo";
+		for (int i = 0; i < argc; i++)
+			new_argv[i + 1] = argv[i];
+		new_argv[argc + 1] = NULL;
+		execvp("sudo", new_argv);
+		perror("sudo");
+		free(new_argv);
+		return 1;
+	}
+#endif
 
 	/* Pre-scan for --log=<file> (global option, works with all subcommands) */
 	for (int i = 1; i < argc; i++) {
@@ -5026,6 +5081,16 @@ int main(int argc, char **argv)
 		ret = qdl_xqcn2tar(argc - 1, argv + 1);
 	} else if (!strcmp(argv[1], "tar2xqcn")) {
 		ret = qdl_tar2xqcn(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "smssend")) {
+		ret = qdl_smssend(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "smsread")) {
+		ret = qdl_smsread(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "smsrm")) {
+		ret = qdl_smsrm(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "smsstatus")) {
+		ret = qdl_smsstatus(argc - 1, argv + 1);
+	} else if (!strcmp(argv[1], "ussd")) {
+		ret = qdl_ussd(argc - 1, argv + 1);
 	} else if (!strcmp(argv[1], "atcmd")) {
 		ret = qdl_atcmd(argc - 1, argv + 1);
 	} else if (!strcmp(argv[1], "atconsole")) {
@@ -5105,11 +5170,16 @@ int main(int argc, char **argv)
 	}
 
 	/* Show fenix art on success, but not for lightweight subcommands
-	 * (qcseriald, list, atcmd, atconsole, version/help) that don't
+	 * (qcseriald, list, AT/SMS commands, version/help) that don't
 	 * perform device flashing/DIAG operations */
 	if (!ret && argc >= 2 &&
 	    strcmp(argv[1], "qcseriald") != 0 &&
 	    strcmp(argv[1], "list") != 0 &&
+	    strcmp(argv[1], "smssend") != 0 &&
+	    strcmp(argv[1], "smsread") != 0 &&
+	    strcmp(argv[1], "smsrm") != 0 &&
+	    strcmp(argv[1], "smsstatus") != 0 &&
+	    strcmp(argv[1], "ussd") != 0 &&
 	    strcmp(argv[1], "atcmd") != 0 &&
 	    strcmp(argv[1], "atconsole") != 0)
 		print_fenix_art(stdout);

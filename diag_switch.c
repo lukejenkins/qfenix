@@ -311,9 +311,7 @@ static int detect_diag_port_linux(char *port_buf, size_t buf_size,
 #ifdef __APPLE__
 #ifdef HAVE_QCSERIALD
 	(void)serial;
-	if (qcseriald_ensure_running() != 0)
-		return 0;
-	return qcseriald_detect_diag_port(port_buf, buf_size);
+	return qcseriald_wait_for_port("diag", port_buf, buf_size);
 #else
 	(void)port_buf;
 	(void)buf_size;
