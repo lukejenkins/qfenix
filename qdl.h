@@ -111,6 +111,14 @@ struct qdl_device_desc {
 
 struct qdl_device_desc *usb_list(unsigned int *devices_found);
 
+struct usb_adb_desc {
+	int vid;
+	int pid;
+	int iface;
+};
+
+struct usb_adb_desc *usb_list_adb(unsigned int *devices_found);
+
 int firehose_run(struct qdl_device *qdl, bool erase_all);
 int firehose_provision(struct qdl_device *qdl);
 int firehose_erase_partition(struct qdl_device *qdl, unsigned int partition,

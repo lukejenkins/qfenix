@@ -51,6 +51,13 @@ int qcseriald_ensure_running(void);
  */
 int qcseriald_wait_for_port(const char *port_type, char *buf, size_t size);
 
+/*
+ * List all ports known to qcseriald for the list command.
+ * Reads daemon status file, prints DIAG/AT/NMEA ports.
+ * Returns number of ports found.
+ */
+int qcseriald_list_ports(FILE *out);
+
 /* Print help text for qcseriald subcommand */
 void print_qcseriald_help(FILE *out);
 

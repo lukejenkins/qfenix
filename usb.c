@@ -374,6 +374,87 @@ struct qdl_device_desc *usb_list(unsigned int *devices_found)
 	return result;
 }
 
+struct usb_adb_desc *usb_list_adb(unsigned int *devices_found)
+{
+	struct libusb_device **devices;
+	struct usb_adb_desc *result;
+	ssize_t device_count;
+	unsigned int count = 0;
+	int ret;
+	int i;
+
+	*devices_found = 0;
+
+	ret = libusb_init(NULL);
+	if (ret < 0)
+		return NULL;
+
+	device_count = libusb_get_device_list(NULL, &devices);
+	if (device_count <= 0) {
+		if (device_count == 0)
+			libusb_free_device_list(devices, 1);
+		libusb_exit(NULL);
+		return NULL;
+	}
+
+	result = calloc(device_count, sizeof(struct usb_adb_desc));
+	if (!result) {
+		libusb_free_device_list(devices, 1);
+		libusb_exit(NULL);
+		return NULL;
+	}
+
+	for (i = 0; i < device_count; i++) {
+		struct libusb_device_descriptor desc;
+		struct libusb_config_descriptor *config;
+		int j, k;
+
+		ret = libusb_get_device_descriptor(devices[i], &desc);
+		if (ret < 0)
+			continue;
+
+		if (!is_diag_vendor(desc.idVendor))
+			continue;
+
+		/* Skip EDL devices */
+		if (is_edl_device(desc.idVendor, desc.idProduct))
+			continue;
+
+		ret = libusb_get_active_config_descriptor(devices[i],
+							  &config);
+		if (ret < 0)
+			continue;
+
+		for (j = 0; j < config->bNumInterfaces; j++) {
+			const struct libusb_interface *iface;
+
+			iface = &config->interface[j];
+			for (k = 0; k < iface->num_altsetting; k++) {
+				const struct libusb_interface_descriptor *alt;
+
+				alt = &iface->altsetting[k];
+				if (alt->bInterfaceClass == 0xFF &&
+				    alt->bInterfaceSubClass == 0x42 &&
+				    alt->bInterfaceProtocol == 0x01) {
+					result[count].vid = desc.idVendor;
+					result[count].pid = desc.idProduct;
+					result[count].iface = alt->bInterfaceNumber;
+					count++;
+					goto next_device;
+				}
+			}
+		}
+next_device:
+		libusb_free_config_descriptor(config);
+	}
+
+	libusb_free_device_list(devices, 1);
+	libusb_exit(NULL);
+	*devices_found = count;
+
+	return result;
+}
+
 static void usb_close(struct qdl_device *qdl)
 {
 	struct qdl_device_usb *qdl_usb = container_of(qdl, struct qdl_device_usb, base);

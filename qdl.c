@@ -916,6 +916,33 @@ static int list_usb_edl(FILE *out)
 	return printed_header ? (int)count : 0;
 }
 
+/*
+ * List USB devices with an ADB interface via libusb.
+ * ADB: class 0xFF, subclass 0x42, protocol 0x01.
+ * Returns number of devices found.
+ */
+static int list_usb_adb(FILE *out)
+{
+	struct usb_adb_desc *devices;
+	unsigned int count;
+	unsigned int i;
+
+	devices = usb_list_adb(&count);
+	if (!devices || count == 0) {
+		free(devices);
+		return 0;
+	}
+
+	fprintf(out, "ADB devices:\n");
+
+	for (i = 0; i < count; i++)
+		fprintf(out, "  %04x:%04x  iface %d\n",
+			devices[i].vid, devices[i].pid, devices[i].iface);
+
+	free(devices);
+	return (int)count;
+}
+
 #ifdef _WIN32
 #include <windows.h>
 #include <setupapi.h>
@@ -958,11 +985,19 @@ static int is_edl_name_list(const char *name)
 	return 0;
 }
 
-static int is_skip_name_list(const char *name)
+static int is_at_name_list(const char *name)
 {
 	if (strstr(name, "AT Port") || strstr(name, "AT Interface") ||
+	    strstr(name, "Modem"))
+		return 1;
+	return 0;
+}
+
+static int is_skip_name_list(const char *name)
+{
+	if (is_at_name_list(name) ||
 	    strstr(name, "NMEA") || strstr(name, "GPS") ||
-	    strstr(name, "Modem") || strstr(name, "Audio"))
+	    strstr(name, "Audio"))
 		return 1;
 	return 0;
 }
@@ -976,8 +1011,8 @@ static int list_com_ports(FILE *out)
 	HDEVINFO hDevInfo;
 	SP_DEVINFO_DATA devInfoData;
 	DWORD i;
-	int edl_count = 0, diag_count = 0;
-	int edl_header = 0, diag_header = 0;
+	int edl_count = 0, diag_count = 0, at_count = 0;
+	int edl_header = 0, diag_header = 0, at_header = 0;
 
 	/* Collect ports in two passes: first EDL, then DIAG */
 	hDevInfo = SetupDiGetClassDevsA(&GUID_DEVCLASS_PORTS_LIST, NULL, NULL,
@@ -1148,12 +1183,87 @@ static int list_com_ports(FILE *out)
 		diag_count++;
 	}
 
+	/* Pass 3: AT ports */
+	for (i = 0; SetupDiEnumDeviceInfo(hDevInfo, i, &devInfoData); i++) {
+		char hwid[512] = {0};
+		char friendlyName[256] = {0};
+		char portName[32] = {0};
+		char *vidStr, *pidStr;
+		HKEY hKey;
+		DWORD size;
+		int vid = 0, pid = 0;
+		const char *bus;
+
+		SetupDiGetDeviceRegistryPropertyA(hDevInfo, &devInfoData,
+			SPDRP_HARDWAREID, NULL, (PBYTE)hwid,
+			sizeof(hwid), NULL);
+
+		SetupDiGetDeviceRegistryPropertyA(hDevInfo, &devInfoData,
+			SPDRP_FRIENDLYNAME, NULL, (PBYTE)friendlyName,
+			sizeof(friendlyName), NULL);
+
+		vidStr = strstr(hwid, "VID_");
+		pidStr = strstr(hwid, "PID_");
+
+		if (vidStr)
+			vid = strtol(vidStr + 4, NULL, 16);
+		if (pidStr)
+			pid = strtol(pidStr + 4, NULL, 16);
+
+		if (vidStr) {
+			if (!is_diag_vendor(vid))
+				continue;
+			if (is_edl_device(vid, pid))
+				continue;
+			bus = "USB";
+		} else {
+			if (!is_qc_modem_name_list(friendlyName))
+				continue;
+			if (is_edl_name_list(friendlyName))
+				continue;
+			bus = "PCIe";
+		}
+
+		if (!is_at_name_list(friendlyName))
+			continue;
+
+		hKey = SetupDiOpenDevRegKey(hDevInfo, &devInfoData,
+					    DICS_FLAG_GLOBAL, 0, DIREG_DEV,
+					    KEY_READ);
+		if (hKey == INVALID_HANDLE_VALUE)
+			continue;
+
+		size = sizeof(portName);
+		if (RegQueryValueExA(hKey, "PortName", NULL, NULL,
+				     (LPBYTE)portName, &size) != ERROR_SUCCESS ||
+		    strncmp(portName, "COM", 3) != 0) {
+			RegCloseKey(hKey);
+			continue;
+		}
+		RegCloseKey(hKey);
+
+		if (!at_header) {
+			if (edl_count + diag_count > 0)
+				fprintf(out, "\n");
+			fprintf(out, "AT devices (COM):\n");
+			at_header = 1;
+		}
+
+		if (vid)
+			fprintf(out, "  %-8s  %04x:%04x  %s  %s\n",
+				portName, vid, pid, friendlyName, bus);
+		else
+			fprintf(out, "  %-8s  %s  %s\n",
+				portName, friendlyName, bus);
+		at_count++;
+	}
+
 	SetupDiDestroyDeviceInfoList(hDevInfo);
 
-	return edl_count + diag_count;
+	return edl_count + diag_count + at_count;
 }
 
-#else /* Linux/POSIX */
+#elif defined(__linux__)
 
 static int list_diag_ports(FILE *out)
 {
@@ -1275,6 +1385,126 @@ static int list_diag_ports(FILE *out)
 	return count;
 }
 
+/*
+ * List non-DIAG serial ports from Qualcomm USB devices on Linux.
+ * These are typically AT command and NMEA ports.
+ */
+static int list_at_ports(FILE *out)
+{
+	const char *base = "/sys/bus/usb/devices";
+	DIR *busdir, *infdir;
+	struct dirent *de, *de2;
+	char path[512], line[256];
+	FILE *fp;
+	int count = 0;
+	int printed_header = 0;
+
+	busdir = opendir(base);
+	if (!busdir)
+		return 0;
+
+	while ((de = readdir(busdir)) != NULL) {
+		int major = 0, vid = 0, pid = 0;
+		char devtype[64] = {0};
+		char product[64] = {0};
+		int diag_iface, iface_num;
+
+		if (!isdigit(de->d_name[0]))
+			continue;
+
+		snprintf(path, sizeof(path), "%s/%s/uevent",
+			 base, de->d_name);
+		fp = fopen(path, "r");
+		if (!fp)
+			continue;
+
+		while (fgets(line, sizeof(line), fp)) {
+			line[strcspn(line, "\r\n")] = 0;
+			if (strncmp(line, "MAJOR=", 6) == 0)
+				major = atoi(line + 6);
+			else if (strncmp(line, "DEVTYPE=", 8) == 0)
+				snprintf(devtype, sizeof(devtype),
+					 "%.63s", line + 8);
+			else if (strncmp(line, "PRODUCT=", 8) == 0)
+				snprintf(product, sizeof(product),
+					 "%.63s", line + 8);
+		}
+		fclose(fp);
+
+		if (major != 189 || strncmp(devtype, "usb_device", 10) != 0)
+			continue;
+
+		sscanf(product, "%x/%x", &vid, &pid);
+
+		if (!is_diag_vendor(vid))
+			continue;
+		if (is_edl_device(vid, pid))
+			continue;
+
+		diag_iface = get_diag_interface_num(vid, pid);
+
+		/* Scan all interfaces EXCEPT the DIAG interface */
+		for (iface_num = 0; iface_num < 16; iface_num++) {
+			if (iface_num == diag_iface)
+				continue;
+
+			snprintf(path, sizeof(path), "%s/%s:1.%d",
+				 base, de->d_name, iface_num);
+			infdir = opendir(path);
+			if (!infdir)
+				continue;
+
+			while ((de2 = readdir(infdir)) != NULL) {
+				char ttypath[520];
+				DIR *ttydir;
+				struct dirent *de3;
+
+				if (strncmp(de2->d_name, "ttyUSB", 6) == 0 ||
+				    strncmp(de2->d_name, "ttyACM", 6) == 0) {
+					if (!printed_header) {
+						fprintf(out, "AT/serial devices:\n");
+						printed_header = 1;
+					}
+					fprintf(out, "  /dev/%-12s  %04x:%04x  iface %d  USB\n",
+						de2->d_name, vid, pid,
+						iface_num);
+					count++;
+					break;
+				}
+
+				if (strncmp(de2->d_name, "tty", 3) == 0 &&
+				    strlen(de2->d_name) == 3) {
+					snprintf(ttypath, sizeof(ttypath),
+						 "%.511s/tty", path);
+					ttydir = opendir(ttypath);
+					if (!ttydir)
+						continue;
+
+					while ((de3 = readdir(ttydir)) != NULL) {
+						if (strncmp(de3->d_name, "ttyUSB", 6) == 0 ||
+						    strncmp(de3->d_name, "ttyACM", 6) == 0) {
+							if (!printed_header) {
+								fprintf(out, "AT/serial devices:\n");
+								printed_header = 1;
+							}
+							fprintf(out, "  /dev/%-12s  %04x:%04x  iface %d  USB\n",
+								de3->d_name, vid, pid,
+								iface_num);
+							count++;
+							break;
+						}
+					}
+					closedir(ttydir);
+				}
+			}
+			closedir(infdir);
+		}
+	}
+
+	closedir(busdir);
+	return count;
+}
+
 static int list_edl_ports(FILE *out)
 {
 	char path[64];
@@ -1309,16 +1539,22 @@ static int list_edl_ports(FILE *out)
 	return count;
 }
 
-#endif /* _WIN32 */
+#endif /* _WIN32 / __linux__ */
 
 static void print_list_help(FILE *out)
 {
 	extern const char *__progname;
 
 	fprintf(out, "Usage: %s list\n", __progname);
-	fprintf(out, "\nList connected EDL, DIAG, and PCIe devices.\n");
-	fprintf(out, "\nScans USB (libusb), Linux MHI, and Windows COM ports.\n");
-	fprintf(out, "Classifies each port as EDL or DIAG by VID/PID or friendly name.\n");
+	fprintf(out, "\nList connected EDL, DIAG, AT, and ADB devices.\n");
+	fprintf(out, "\nScans USB (libusb) for EDL and ADB devices.\n");
+#ifdef _WIN32
+	fprintf(out, "Scans Windows COM ports for EDL, DIAG, and AT devices.\n");
+#elif defined(__APPLE__)
+	fprintf(out, "Queries qcseriald for DIAG and AT ports (macOS).\n");
+#else
+	fprintf(out, "Scans Linux sysfs/MHI for DIAG, AT, and PCIe devices.\n");
+#endif
 	fprintf(out, "\nExamples:\n");
 	fprintf(out, "  %s list\n", __progname);
 }
@@ -1326,33 +1562,52 @@ static void print_list_help(FILE *out)
 static int qdl_list(FILE *out)
 {
 	int found = 0;
-	int n;
+	int prev, n;
 
+	/* EDL devices via libusb (all platforms) */
 	n = list_usb_edl(out);
 	found += n;
 
 #ifdef _WIN32
-	{
-		int com_count;
-
-		if (n > 0)
-			fprintf(out, "\n");
-		com_count = list_com_ports(out);
-		found += com_count;
-	}
-#else
-	{
-		int edl_n, diag_n;
-
-		edl_n = list_edl_ports(out);
-		if (edl_n > 0 && n > 0)
-			fprintf(out, "\n");
-		found += edl_n;
-
-		diag_n = list_diag_ports(out);
-		found += diag_n;
-	}
+	prev = found;
+	n = list_com_ports(out);
+	if (n > 0 && prev > 0)
+		fprintf(out, "\n");
+	found += n;
+#elif defined(__APPLE__)
+#ifdef HAVE_QCSERIALD
+	prev = found;
+	n = qcseriald_list_ports(out);
+	if (n > 0 && prev > 0)
+		fprintf(out, "\n");
+	found += n;
 #endif
+#else /* Linux */
+	prev = found;
+	n = list_edl_ports(out);
+	if (n > 0 && prev > 0)
+		fprintf(out, "\n");
+	found += n;
+
+	prev = found;
+	n = list_diag_ports(out);
+	if (n > 0 && prev > 0)
+		fprintf(out, "\n");
+	found += n;
+
+	prev = found;
+	n = list_at_ports(out);
+	if (n > 0 && prev > 0)
+		fprintf(out, "\n");
+	found += n;
+#endif
+
+	/* ADB devices via libusb (all platforms) */
+	prev = found;
+	n = list_usb_adb(out);
+	if (n > 0 && prev > 0)
+		fprintf(out, "\n");
+	found += n;
 
 	if (!found)
 		fprintf(out, "No devices found\n");

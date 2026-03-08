@@ -2216,6 +2216,54 @@ int qcseriald_detect_at_port(char *buf, size_t size, int index)
 	return read_status_port(buf, size, prefix);
 }
 
+int qcseriald_list_ports(FILE *out)
+{
+	struct daemon_status st;
+	char path[256];
+	int count = 0;
+	int diag_header = 0, at_header = 0;
+	int i;
+
+	init_runtime_paths();
+
+	if (!read_daemon_status(&st))
+		return 0;
+
+	if (!st.has_ports)
+		return 0;
+
+	/* List ports by type: DIAG first, then AT/serial */
+	for (i = 0; i < st.port_count; i++) {
+		if (strcmp(st.ports[i], "diag") != 0)
+			continue;
+		if (!read_status_port(path, sizeof(path), st.ports[i]))
+			continue;
+		if (!diag_header) {
+			fprintf(out, "DIAG devices (qcseriald):\n");
+			diag_header = 1;
+		}
+		fprintf(out, "  %s\n", path);
+		count++;
+	}
+
+	for (i = 0; i < st.port_count; i++) {
+		if (strcmp(st.ports[i], "diag") == 0)
+			continue;
+		if (!read_status_port(path, sizeof(path), st.ports[i]))
+			continue;
+		if (!at_header) {
+			if (diag_header)
+				fprintf(out, "\n");
+			fprintf(out, "AT/serial devices (qcseriald):\n");
+			at_header = 1;
+		}
+		fprintf(out, "  %-32s  (%s)\n", path, st.ports[i]);
+		count++;
+	}
+
+	return count;
+}
+
 /* ── Help text ── */
 
 void print_qcseriald_help(FILE *out)
