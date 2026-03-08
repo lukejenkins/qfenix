@@ -168,11 +168,11 @@ int at_send_cmd(struct at_session *sess, const char *cmd,
 	PurgeComm((HANDLE)(intptr_t)(fd), PURGE_RXCLEAR | PURGE_TXCLEAR)
 
 /* Windows write() shim — wraps WriteFile for AT command I/O */
-static inline ssize_t at_write(int fd, const void *buf, size_t len)
+static inline ssize_t at_write(intptr_t fd, const void *buf, size_t len)
 {
 	DWORD written;
 
-	if (!WriteFile((HANDLE)(intptr_t)fd, buf, (DWORD)len, &written, NULL))
+	if (!WriteFile((HANDLE)fd, buf, (DWORD)len, &written, NULL))
 		return -1;
 	return (ssize_t)written;
 }
@@ -243,7 +243,7 @@ struct at_session *at_open(const char *port, int timeout_ms)
 		CloseHandle(hSerial);
 		return NULL;
 	}
-	s->fd = (int)(intptr_t)hSerial;
+	s->fd = (intptr_t)hSerial;
 	snprintf(s->port, sizeof(s->port), "%s", port);
 	s->timeout_ms = timeout_ms;
 	return s;
@@ -254,13 +254,13 @@ void at_close(struct at_session *sess)
 	if (!sess)
 		return;
 	if (sess->fd)
-		CloseHandle((HANDLE)(intptr_t)sess->fd);
+		CloseHandle((HANDLE)sess->fd);
 	free(sess);
 }
 
 int at_read_line(struct at_session *sess, char *buf, size_t size)
 {
-	HANDLE h = (HANDLE)(intptr_t)sess->fd;
+	HANDLE h = (HANDLE)sess->fd;
 	size_t pos = 0;
 	DWORD n;
 	char c;
@@ -279,7 +279,7 @@ int at_read_line(struct at_session *sess, char *buf, size_t size)
 int at_send_cmd(struct at_session *sess, const char *cmd,
 		char *resp, size_t resp_size)
 {
-	HANDLE h = (HANDLE)(intptr_t)sess->fd;
+	HANDLE h = (HANDLE)sess->fd;
 	char line[1024];
 	size_t resp_pos = 0;
 	int len;

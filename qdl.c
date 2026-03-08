@@ -4997,8 +4997,14 @@ int main(int argc, char **argv)
 	ux_init();
 
 #if defined(__APPLE__) || defined(__linux__)
-	/* macOS/Linux require root for USB/serial device access */
-	if (getuid() != 0) {
+	/* macOS/Linux require root for USB/serial device access.
+	 * Skip sudo for commands that don't need it. */
+	if (getuid() != 0 &&
+	    !(argc < 2 ||
+	      !strcmp(argv[1], "--help") || !strcmp(argv[1], "-h") ||
+	      !strcmp(argv[1], "--help-all") ||
+	      !strcmp(argv[1], "--version") || !strcmp(argv[1], "-v") ||
+	      !strcmp(argv[1], "xqcn2tar") || !strcmp(argv[1], "tar2xqcn"))) {
 		char **new_argv = malloc((argc + 2) * sizeof(char *));
 
 		if (!new_argv) {

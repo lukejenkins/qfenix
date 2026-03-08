@@ -2,10 +2,11 @@
 #ifndef __ATCMD_H__
 #define __ATCMD_H__
 
+#include <stdint.h>
 #include <stdio.h>
 
 struct at_session {
-	int  fd;
+	intptr_t fd;
 	char port[256];
 	int  timeout_ms;
 	int  debug;
