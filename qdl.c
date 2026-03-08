@@ -1416,12 +1416,22 @@ static int probe_at_port(const char *port_path)
 
 	pfd.fd = fd;
 	pfd.events = POLLIN;
-	ret = poll(&pfd, 1, 500);
-	if (ret > 0 && (pfd.revents & POLLIN)) {
-		int n = read(fd, resp, sizeof(resp) - 1);
 
-		if (n > 0)
-			resp[n] = '\0';
+	/* Read in a loop — first poll may only return the AT echo */
+	int resp_len = 0;
+
+	while (resp_len < (int)sizeof(resp) - 1) {
+		ret = poll(&pfd, 1, 500);
+		if (ret <= 0 || !(pfd.revents & POLLIN))
+			break;
+		ret = read(fd, resp + resp_len,
+			   sizeof(resp) - 1 - resp_len);
+		if (ret <= 0)
+			break;
+		resp_len += ret;
+		resp[resp_len] = '\0';
+		if (strstr(resp, "OK") || strstr(resp, "ERROR"))
+			break;
 	}
 
 	close(fd);

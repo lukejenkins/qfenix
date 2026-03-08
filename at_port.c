@@ -299,11 +299,22 @@ int at_detect_port(char *buf, size_t size, const char *serial)
 
 				pfd.fd = fd;
 				pfd.events = POLLIN;
-				ret = poll(&pfd, 1, 2000);
-				if (ret > 0 && (pfd.revents & POLLIN)) {
-					resp_len = read(fd, resp, sizeof(resp) - 1);
-					if (resp_len > 0)
-						resp[resp_len] = '\0';
+
+				/* Read in a loop — first poll may only
+				 * return the AT echo, OK comes after. */
+				while (resp_len < (int)sizeof(resp) - 1) {
+					ret = poll(&pfd, 1, 500);
+					if (ret <= 0 || !(pfd.revents & POLLIN))
+						break;
+					ret = read(fd, resp + resp_len,
+						   sizeof(resp) - 1 - resp_len);
+					if (ret <= 0)
+						break;
+					resp_len += ret;
+					resp[resp_len] = '\0';
+					if (strstr(resp, "OK") ||
+					    strstr(resp, "ERROR"))
+						break;
 				}
 
 				close(fd);
