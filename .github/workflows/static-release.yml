@@ -590,7 +590,7 @@ jobs:
           cd artifacts
 
           # Linux/macOS: tar.gz to preserve executable permission
-          for dir in linux-x64 linux-arm64 linux-arm macos-arm64 macos-x64 macos-universal; do
+          for dir in linux-x64 linux-arm64 linux-arm macos-universal; do
             cd $dir
             chmod +x qfenix
             tar -czvf ../qfenix-${dir}.tar.gz qfenix
@@ -611,8 +611,6 @@ jobs:
             artifacts/qfenix-linux-x64.tar.gz
             artifacts/qfenix-linux-arm64.tar.gz
             artifacts/qfenix-linux-arm.tar.gz
-            artifacts/qfenix-macos-arm64.tar.gz
-            artifacts/qfenix-macos-x64.tar.gz
             artifacts/qfenix-macos-universal.tar.gz
             artifacts/qfenix-windows-x64.exe
             artifacts/qfenix-windows-x86.exe

@@ -882,7 +882,7 @@ static void print_usage(FILE *out)
 	fprintf(out, "  %s printgpt                       Print partitions (with loader in current dir)\n", __progname);
 	fprintf(out, "  %s readall -o backup/             Dump all partitions to backup/\n", __progname);
 	fprintf(out, "  %s list                           List connected devices\n", __progname);
-	fprintf(out, "  %s efsbackup -x                   Backup EFS + NV items to XQCN\n", __progname);
+	fprintf(out, "  %s efsbackup                      Backup EFS + NV items to XQCN\n", __progname);
 	fprintf(out, "  %s efsrestore backup.xqcn         Restore from XQCN file\n", __progname);
 	fprintf(out, "  %s nvread 550                     Read NV item 550\n", __progname);
 }
@@ -4148,25 +4148,25 @@ static void print_efsbackup_help(FILE *out)
 {
 	extern const char *__progname;
 
-	fprintf(out, "Usage: %s efsbackup [-o FILE] [-x] [--quick] [path] [options]\n", __progname);
-	fprintf(out, "\nBackup EFS filesystem to TAR or XQCN format.\n");
+	fprintf(out, "Usage: %s efsbackup [-o FILE] [-t] [--quick] [path] [options]\n", __progname);
+	fprintf(out, "\nBackup EFS filesystem to XQCN or TAR format.\n");
 	fprintf(out, "\nOptions:\n");
-	fprintf(out, "  -o, --output=FILE     Output file (default: efs_backup.tar or .xqcn)\n");
-	fprintf(out, "  -x, --xqcn           Generate XQCN format (includes NV items)\n");
+	fprintf(out, "  -o, --output=FILE     Output file (default: efs_backup.xqcn or .tar)\n");
+	fprintf(out, "  -t, --tar            Generate TAR format instead of XQCN\n");
 	fprintf(out, "  -q, --quick          Skip probe walk (tree walk only, faster)\n");
 	fprintf(out, "  -m, --manual         Force manual tree walk (skip modem TAR generation)\n");
 	fprintf(out, "  -S, --serial=S       Target device by serial/port\n");
 	fprintf(out, "  -d, --debug          Print detailed debug info\n");
 	fprintf(out, "  -h, --help           Print this help\n");
-	fprintf(out, "\nDefault TAR backup probes known paths for comprehensive coverage.\n");
-	fprintf(out, "Use --quick for fast tree-walk-only backup.\n");
-	fprintf(out, "Use -x for QPST-compatible XQCN format (slower, scans NV items).\n");
+	fprintf(out, "\nDefault XQCN backup includes NV items for QPST-compatible restore.\n");
+	fprintf(out, "Use -t for TAR format with probe-based path coverage.\n");
+	fprintf(out, "Use --quick for fast tree-walk-only backup (TAR only).\n");
 	fprintf(out, "\nIf [path] is given, only that EFS subtree is backed up (default: /).\n");
 	fprintf(out, "\nExamples:\n");
 	fprintf(out, "  %s efsbackup\n", __progname);
-	fprintf(out, "  %s efsbackup -x -o my_backup.xqcn\n", __progname);
-	fprintf(out, "  %s efsbackup --quick -o quick.tar\n", __progname);
-	fprintf(out, "  %s efsbackup /nv/item_files/ -o nv_only.tar\n", __progname);
+	fprintf(out, "  %s efsbackup -o my_backup.xqcn\n", __progname);
+	fprintf(out, "  %s efsbackup -t -o backup.tar\n", __progname);
+	fprintf(out, "  %s efsbackup -t --quick -o quick.tar\n", __progname);
 }
 
 static int qdl_efsbackup(int argc, char **argv)
@@ -4176,7 +4176,7 @@ static int qdl_efsbackup(int argc, char **argv)
 	const char *output = NULL;
 	const char *path = "/";
 	bool manual = false;
-	bool xqcn = false;
+	bool tar = false;
 	bool quick = false;
 	int opt;
 	int ret;
@@ -4187,13 +4187,13 @@ static int qdl_efsbackup(int argc, char **argv)
 		{"serial", required_argument, 0, 'S'},
 		{"output", required_argument, 0, 'o'},
 		{"manual", no_argument, 0, 'm'},
-		{"xqcn", no_argument, 0, 'x'},
+		{"tar", no_argument, 0, 't'},
 		{"quick", no_argument, 0, 'q'},
 		{"help", no_argument, 0, 'h'},
 		{0, 0, 0, 0}
 	};
 
-	while ((opt = getopt_long(argc, argv, "dvS:o:mxqh", options,
+	while ((opt = getopt_long(argc, argv, "dvS:o:mtqh", options,
 				  NULL)) != -1) {
 		switch (opt) {
 		case 'd':
@@ -4211,8 +4211,8 @@ static int qdl_efsbackup(int argc, char **argv)
 		case 'm':
 			manual = true;
 			break;
-		case 'x':
-			xqcn = true;
+		case 't':
+			tar = true;
 			break;
 		case 'q':
 			quick = true;
@@ -4230,7 +4230,7 @@ static int qdl_efsbackup(int argc, char **argv)
 		path = argv[optind];
 
 	if (!output)
-		output = xqcn ? "efs_backup.xqcn" : "efs_backup.tar";
+		output = tar ? "efs_backup.tar" : "efs_backup.xqcn";
 
 	sess = diag_open(serial);
 	if (!sess)
@@ -4238,12 +4238,12 @@ static int qdl_efsbackup(int argc, char **argv)
 
 	diag_offline(sess);
 
-	if (xqcn)
-		ret = diag_efs_backup_xqcn(sess, output);
-	else if (manual)
+	if (tar && manual)
 		ret = diag_efs_backup(sess, path, output, true);
-	else
+	else if (tar)
 		ret = diag_efs_backup_enhanced(sess, path, output, quick);
+	else
+		ret = diag_efs_backup_xqcn(sess, output);
 
 	diag_online(sess);
 	diag_close(sess);
