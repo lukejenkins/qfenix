@@ -88,18 +88,27 @@ set(GUI_CXX_SRCS
     src/ProcessRunner.cpp
 )
 
+if(APPLE)
+    list(APPEND GUI_CXX_SRCS src/macos_icon.mm)
+endif()
+
 # ---- Single combined binary ----
 
 set(ALL_SRCS ${QFENIX_C_SRCS} ${GUI_CXX_SRCS})
 
 if(APPLE)
-    add_executable(QFenix MACOSX_BUNDLE ${ALL_SRCS})
+    set(MACOS_ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/qfenix.icns")
+    set_source_files_properties(${MACOS_ICON} PROPERTIES
+        MACOSX_PACKAGE_LOCATION "Resources"
+    )
+    add_executable(QFenix MACOSX_BUNDLE ${ALL_SRCS} ${MACOS_ICON})
     set_target_properties(QFenix PROPERTIES
         OUTPUT_NAME "qfenix"
         MACOSX_BUNDLE_BUNDLE_NAME "QFenix"
         MACOSX_BUNDLE_GUI_IDENTIFIER "com.iamromulan.qfenix"
         MACOSX_BUNDLE_BUNDLE_VERSION "${PROJECT_VERSION}"
         MACOSX_BUNDLE_SHORT_VERSION_STRING "${PROJECT_VERSION}"
+        MACOSX_BUNDLE_ICON_FILE "qfenix.icns"
     )
 elseif(WIN32)
     add_executable(QFenix WIN32 ${ALL_SRCS})

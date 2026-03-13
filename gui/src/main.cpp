@@ -9,10 +9,17 @@
  */
 extern "C" int qfenix_cli_main(int argc, char **argv);
 
+#ifdef __APPLE__
+extern void SetMacOSDockIcon();
+#endif
+
 class QFenixApp : public wxApp {
 public:
 	bool OnInit() override
 	{
+#ifdef __APPLE__
+		SetMacOSDockIcon();
+#endif
 		auto *frame = new MainFrame();
 		frame->Show(true);
 		return true;
