@@ -42,7 +42,7 @@
 
 /* ── Version ── */
 
-#define QCSERIALD_VERSION "1.0.5"
+#define QCSERIALD_VERSION "1.0.6"
 
 /* ── Constants ── */
 
@@ -122,6 +122,8 @@ static char g_edl_product[128];		/* product name of EDL device */
 static bridge_t g_bridges[MAX_INTERFACES];
 static int g_bridge_count;
 static int g_expected_bridges;  /* vendor-specific interfaces found (minus ADB) */
+static int g_matched_vid;        /* VID of connected modem */
+static uint64_t g_session_id;    /* IOKit sessionID — changes on USB re-enumeration */
 
 static pthread_mutex_t g_exit_mutex = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t  g_exit_cond  = PTHREAD_COND_INITIALIZER;
@@ -279,6 +281,14 @@ static void cleanup_stale_symlinks(void)
 
 /* ── Thread: USB bulk IN → PTY master ── */
 
+static int pty_slave_is_open(int master_fd)
+{
+	ssize_t ret = write(master_fd, "", 0);
+	if (ret < 0 && errno == EIO)
+		return 0;
+	return 1;
+}
+
 static void *usb_to_pty(void *arg)
 {
 	bridge_t *b = (bridge_t *)arg;
@@ -294,6 +304,12 @@ static void *usb_to_pty(void *arg)
 
 	while (atomic_load(&g_running) &&
 	       atomic_load(&b->state) == BRIDGE_RUNNING) {
+		if (!pty_slave_is_open(b->pty_master)) {
+			usleep(100000);
+			last_good_read = time(NULL);
+			continue;
+		}
+
 		len = sizeof(buf);
 		kr = (*b->iface)->ReadPipe(b->iface, b->pipe_in, buf, &len);
 		if (kr != kIOReturnSuccess) {
@@ -596,6 +612,17 @@ static int setup_bridges(void)
 
 	printf("Matched vendor: %s (VID 0x%04x PID 0x%04x)\n",
 	       matched_vendor, matched_vid, matched_pid);
+	g_matched_vid = matched_vid;
+
+	/* Store sessionID for re-enumeration detection in monitor */
+	CFNumberRef sessionRef = IORegistryEntryCreateCFProperty(device,
+		CFSTR("sessionID"), kCFAllocatorDefault, 0);
+	if (sessionRef) {
+		long long sid = 0;
+		CFNumberGetValue(sessionRef, kCFNumberLongLongType, &sid);
+		g_session_id = (uint64_t)sid;
+		CFRelease(sessionRef);
+	}
 
 	CFStringRef product = IORegistryEntryCreateCFProperty(
 		device, CFSTR("USB Product Name"), kCFAllocatorDefault, 0);
@@ -691,6 +718,15 @@ static int setup_bridges(void)
 			continue;
 		}
 
+		/* Skip QMI/RmNet interface (subclass 0xFF, protocol 0xFF).
+		 * QMI is a binary modem control protocol, not serial data.
+		 * Distinct from DIAG which is 0xFF/0xFF/0x30. */
+		if (iface_subclass == 0xFF && iface_protocol == 0xFF) {
+			printf("Skipping QMI/RmNet interface %d\n", iface_num);
+			(*iface)->Release(iface);
+			continue;
+		}
+
 		iface_count++;
 		kr = (*iface)->USBInterfaceOpen(iface);
 		if (kr != kIOReturnSuccess) {
@@ -747,9 +783,12 @@ static int setup_bridges(void)
 		cfmakeraw(&tio);
 		tcsetattr(master, TCSANOW, &tio);
 
-		/* Keep slave open so master writes don't EIO — preserves
-		 * modem data (including RDY URC) in PTY buffer. */
+		/* Close slave fd so pty_slave_is_open() can detect when no
+		 * external client has the slave open (write returns EIO).
+		 * Enables demand-driven USB reads. */
 		chmod(slave_name, 0666);
+		close(slave);
+		slave = -1;
 
 		char func_buf[32];
 		const char *func;
@@ -1407,9 +1446,56 @@ static void run_monitor_loop(void)
 				alive_count++;
 		}
 
+		int device_ok = 1;
+		if (g_bridge_count > 0 && g_matched_vid) {
+			device_ok = 0;
+			io_iterator_t iter;
+			kern_return_t kr = IOServiceGetMatchingServices(
+				kIOMainPortDefault,
+				IOServiceMatching("IOUSBHostDevice"), &iter);
+			if (kr == KERN_SUCCESS) {
+				io_service_t dev;
+				while ((dev = IOIteratorNext(iter))) {
+					CFNumberRef vidRef =
+						IORegistryEntryCreateCFProperty(
+							dev, CFSTR("idVendor"),
+							kCFAllocatorDefault, 0);
+					if (vidRef) {
+						int vid = 0;
+						CFNumberGetValue(vidRef,
+							kCFNumberIntType, &vid);
+						CFRelease(vidRef);
+						if (vid == g_matched_vid) {
+							CFNumberRef sidRef =
+								IORegistryEntryCreateCFProperty(
+									dev,
+									CFSTR("sessionID"),
+									kCFAllocatorDefault,
+									0);
+							if (sidRef) {
+								long long sid = 0;
+								CFNumberGetValue(sidRef,
+									kCFNumberLongLongType,
+									&sid);
+								CFRelease(sidRef);
+								if ((uint64_t)sid ==
+								    g_session_id)
+									device_ok = 1;
+							}
+						}
+					}
+					IOObjectRelease(dev);
+					if (device_ok)
+						break;
+				}
+				IOObjectRelease(iter);
+			}
+		}
+
 		write_status_file();
 
-		if (g_bridge_count > 0 && alive_count == 0) {
+		if (g_bridge_count > 0 &&
+		    (alive_count < g_bridge_count || !device_ok)) {
 			printf(UX_COLOR_YELLOW
 			       "All bridges dead — modem likely disconnected\n"
 			       UX_COLOR_RESET);
@@ -1428,6 +1514,7 @@ static void run_monitor_loop(void)
 			       "Waiting for modem...\n"
 			       UX_COLOR_RESET);
 			int retries_with_partial = 0;
+			prev_bridge_count = 0;
 
 			while (atomic_load(&g_running)) {
 				for (int s = 0;
