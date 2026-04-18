@@ -716,8 +716,31 @@ int diag_offline(struct diag_session *sess)
 
 int diag_online(struct diag_session *sess)
 {
+	int ret;
+
+	/*
+	 * Issue the mode change first, then log truthfully based on the
+	 * outcome.  On some firmwares (observed: Quectel SDX62
+	 * RM520NGLAAR01A05M4G_01.001.01.001) DIAG_MODE_ONLINE is accepted
+	 * by the firmware but does NOT actually return CFUN to 1 — the
+	 * modem stays at +CFUN: 7 at the AT surface.  An unconditional
+	 * "switching modem back to online mode" log line in that case
+	 * misleads the operator into thinking recovery happened when it
+	 * didn't.  Recovery in practice requires AT+CFUN=1,1 on a paired
+	 * AT port followed by ~35s settle, OR the DIAG_MODE_RESET path
+	 * already used by the XQCN-restore call site below.
+	 */
+	ret = diag_set_mode(sess, DIAG_MODE_ONLINE);
+	if (ret) {
+		ux_warn("failed to switch modem back to online mode "
+			"(DIAG_MODE_ONLINE rejected) — modem may be left "
+			"at CFUN=7; recover with AT+CFUN=1,1 on the paired "
+			"AT port and wait ~35s\n");
+		return ret;
+	}
+
 	ux_info("switching modem back to online mode\n");
-	return diag_set_mode(sess, DIAG_MODE_ONLINE);
+	return 0;
 }
 
 /*
